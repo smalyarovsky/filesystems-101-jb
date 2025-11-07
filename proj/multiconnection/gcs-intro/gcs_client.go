@@ -42,24 +42,25 @@ func NewGcsClient(ctx context.Context) (c *GcsClient, err error) {
 	return c, nil
 }
 
-func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, data []byte) (err error) {
+func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, data []byte) (duration float64, err error) {
 	req, err := http.NewRequestWithContext(ctx,
 		http.MethodPut, c.objectUrl(bucket, name),
 		bytes.NewReader(data))
 	if err != nil {
-		return err
+		return 0, err
 	}
-
+	start := time.Now()
 	resp, err := c.h.Do(req)
+	duration = time.Since(start).Seconds()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload failed with status %q", resp.Status)
+		return 0, fmt.Errorf("upload failed with status %q", resp.Status)
 	}
 
-	return nil
+	return duration, nil
 }
 
 func (c *GcsClient) NewUploadSession(ctx context.Context, bucket, name string) (uploadUrl string, err error) {
@@ -93,12 +94,12 @@ func (c *GcsClient) NewUploadSession(ctx context.Context, bucket, name string) (
 	return uploadUrl, nil
 }
 
-func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off int64, data []byte, last bool) (err error) {
+func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off int64, data []byte, last bool) (duration float64, err error) {
 	req, err := http.NewRequestWithContext(ctx,
 		http.MethodPut, uploadUrl,
 		bytes.NewReader(data))
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	var contentRange string
@@ -111,10 +112,10 @@ func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off 
 		}
 	} else {
 		if len(data)%googleapi.MinUploadChunkSize != 0 {
-			return fmt.Errorf("unaligned chunk, size=%d", len(data))
+			return 0, fmt.Errorf("unaligned chunk, size=%d", len(data))
 		}
 		if len(data) == 0 {
-			return fmt.Errorf("only the last chunk may be empty")
+			return 0, fmt.Errorf("only the last chunk may be empty")
 		}
 
 		begin, end := off, off+int64(len(data))
@@ -125,14 +126,16 @@ func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off 
 	req.ContentLength = int64(len(data))
 	req.Header.Set("X-GUploader-No-308", "yes")
 
+	start := time.Now()
 	resp, err := c.h.Do(req)
+	duration = time.Since(start).Seconds()
 	if err != nil {
-		return nil
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	_, _, err = c.parseOffsetResponse(resp)
-	return err
+	return duration, err
 }
 
 func (c *GcsClient) GetResumeOffset(ctx context.Context, uploadUrl string) (off int64, complete bool, err error) {

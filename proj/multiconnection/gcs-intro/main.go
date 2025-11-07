@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -46,9 +47,37 @@ func runUploadObj(self *cobra.Command, args []string) (err error) {
 		return err
 	}
 
-	buf := makeRandBuf(4096)
-	if err = c.UploadObject(ctx, uploadObjArgs.bucket, "x", buf); err != nil {
-		return err
+	const runs = 16
+	const minSize int = 1 << 20
+	const maxSize int = 128 << 20
+
+	for size := minSize; size <= maxSize; size <<= 1 {
+		buf := makeRandBuf(size)
+		durations := make([]float64, 0, runs)
+
+		for i := range runs {
+			d, err := c.UploadObject(ctx, uploadObjArgs.bucket, fmt.Sprintf("x-%d-%d", size/minSize, i), buf)
+			if err != nil {
+				return err
+			}
+			durations = append(durations, d)
+		}
+
+		var meanTime float64
+		for _, d := range durations {
+			meanTime += d
+		}
+		meanTime = meanTime / float64(len(durations))
+		meanSpeed := float64(size/minSize) / meanTime
+		var sigma float64
+		for _, d := range durations {
+			diff := meanSpeed - float64(size/minSize)/d
+			sigma += diff * diff
+		}
+		sigma = math.Sqrt(sigma / float64(len(durations)))
+
+		fmt.Printf("size=%3d MiB: mean speed=%.3f MiB/s, standard deviation=%.6f MiB/s\n",
+			size/minSize, meanSpeed, sigma)
 	}
 
 	return nil
@@ -80,35 +109,57 @@ func runUploadMultipartObj(self *cobra.Command, args []string) (err error) {
 		return err
 	}
 
-	uploadUrl, err := c.NewUploadSession(ctx, uploadMultipartObjArgs.bucket, "x")
-	if err != nil {
-		return err
+	const runs int = 16
+	const minSize int = 1 << 20   // 1 MiB
+	const maxSize int = 128 << 20 // 128 MiB
+
+	for size := minSize; size <= maxSize; size <<= 1 {
+
+		uploadUrl, err := c.NewUploadSession(ctx, uploadMultipartObjArgs.bucket, fmt.Sprintf("x-%d", size/minSize))
+		if err != nil {
+			return err
+		}
+
+		off, buf := int64(0), makeRandBuf(size)
+
+		durations := make([]float64, 0, runs)
+
+		for i := range runs {
+			d, err := c.UploadObjectPart(ctx, uploadUrl, off, buf, i == runs-1)
+			if err != nil {
+				return err
+			}
+			durations = append(durations, d)
+
+			off += int64(size)
+
+			testOff, testLast, err := c.GetResumeOffset(ctx, uploadUrl)
+			if err != nil {
+				return err
+			}
+			if testOff != off {
+				return fmt.Errorf("unexpected offset: got %d, want %d", testOff, off)
+			}
+			if testLast != (i == runs-1) {
+				return fmt.Errorf("unexpected last part flag: got %t, want %t", testLast, i == runs-1)
+			}
+		}
+		var meanTime float64
+		for _, d := range durations {
+			meanTime += d
+		}
+		meanTime = meanTime / float64(len(durations))
+		meanSpeed := float64(size/minSize) / meanTime
+		var sigma float64
+		for _, d := range durations {
+			diff := meanSpeed - float64(size/minSize)/d
+			sigma += diff * diff
+		}
+		sigma = math.Sqrt(sigma / float64(len(durations)))
+
+		fmt.Printf("size=%3d MiB: mean speed=%.3f MiB/s, standard deviation=%.6f MiB/s\n",
+			size/minSize, meanSpeed, sigma)
+
 	}
-
-	const chunkSize = 256 * 1024
-	off, buf := int64(0), makeRandBuf(2*chunkSize)
-
-	if err = c.UploadObjectPart(ctx, uploadUrl, off, buf[:chunkSize], false); err != nil {
-		return err
-	}
-	off += chunkSize
-	buf = buf[chunkSize:]
-
-	testOff, testLast, err := c.GetResumeOffset(ctx, uploadUrl)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
-
-	if err = c.UploadObjectPart(ctx, uploadUrl, off, buf[:chunkSize], true); err != nil {
-		return err
-	}
-
-	testOff, testLast, err = c.GetResumeOffset(ctx, uploadUrl)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
-
 	return nil
 }
